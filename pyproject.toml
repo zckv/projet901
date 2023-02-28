@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "numbajacobi"
+version = "0.1.0"
+description = "Implementation of Jacobi stencil with numba and numba-mpi"
+authors = ["Zackarie Vinckier <zackarie.vinckier--coffinier@etudiant.univ-reims.fr>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.7"
+numba-mpi = "^0.26"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
