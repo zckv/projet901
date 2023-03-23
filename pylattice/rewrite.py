@@ -1,14 +1,18 @@
 from argparse import ArgumentParser
 from math import sqrt
 import logging
+import time
+
+from sys import argv
 
 NSPEEDS = 9
 FINALSTATEFILE = "final_state.dat"
 INITIALSTATEFILE = "initial_state.dat"
 AVVELSFILE = "av_vels.dat"
 
+logging.basicConfig(encoding='utf-8', level=logging.DEBUG)
 logger = logging.Logger(name="MainLogger")
-
+logger.setLevel(logging.DEBUG)
 
 class ProjectParser(ArgumentParser):
     """Parse args from command line"""
@@ -18,13 +22,13 @@ class ProjectParser(ArgumentParser):
 def read_input_file(file_path):
     d = {}
     with open(file_path, 'r') as f:
-        d["nx"] = f.readLine()
-        d["ny"] = f.readLine()
-        d["maxIters"] = f.readLine()
-        d["reynolds_dim"] = f.readLine()
-        d["density"] = f.readLine()
-        d["accel"] = f.readLine()
-        d["omega"] = f.readLine()
+        d["nx"] = int(f.readline())
+        d["ny"] = int(f.readline())
+        d["maxIters"] = int(f.readline())
+        d["reynolds_dim"] = int(f.readline())
+        d["density"] = float(f.readline())
+        d["accel"] = float(f.readline())
+        d["omega"] = float(f.readline())
     return d
 
 
@@ -39,8 +43,14 @@ def read_obstacle_file(file_path):
 
 def main():
     # TODO initalization
-    param = read_input_file("")
-    block = read_obstacle_file("")
+
+    logger.debug("==start program==")
+
+    param = read_input_file(argv[1])
+    block = read_obstacle_file(argv[2])
+
+    tot_tic = time.time_ns()
+    init_tic = time.time_ns()
 
     w0 = param["density"] * 4 / 9
     w1 = param["density"] / 9
@@ -51,21 +61,93 @@ def main():
     density = param["density"]
     accel = param["accel"]
     omega = param["omega"]
+    reynolds_dim = param["reynolds_dim"]
 
     # main_grid
     cells = [[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)]
-    tmp_cells = [[[0.0 * NSPEEDS] for _ in range(nx)] for _ in range(ny)]
+    tmp_cells = [[[0.0] * NSPEEDS for _ in range(nx)] for _ in range(ny)]
     obstacles = [[1 if (x, y) in block else 0 for x in range(nx)] for y in range(ny)]
     av_vels = [0.0] * param["maxIters"]
 
     logger.debug(param)
 
-    for tt in range(param["maxIters"]):
+    init_toc = time.time_ns()
+    comp_tic = time.time_ns()
+
+    for tt in range(0): # param["maxIters"]):
+        logger.debug("==Start step==")
         timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega)
         av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
         logger.debug(f"==timestep: {tt}==")
         logger.debug(f"ev velocity: {av_vels[tt]}==")
         logger.debug(f"tot density: {total_density(cells, nx, ny)}==")
+
+    comp_toc = time.time_ns()
+    col_tic = time.time_ns()
+
+    # TODO collate data here
+
+    col_toc = time.time_ns()
+    tot_toc = time.time_ns()
+
+    print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
+    print(f"Elapsed Init time:\t\t\t{init_toc - init_tic}")
+    print(f"Elapsed Compute time:\t\t\t{comp_toc - comp_tic}")
+    print(f"Elapsed Collate time:\t\t\t{col_toc - col_tic}")
+    print(f"Elapsed Total time:\t\t\t{tot_toc - tot_tic}")
+
+    write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
+
+
+def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
+    viscosity = 1. / 6. * (2. / omega - 1.)
+    return av_velocity(cells, obstacles, nx, ny) * reynolds_dim / viscosity
+
+
+def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
+    c_sq = 1. / 3.
+    with open(FINALSTATEFILE, "w") as f:
+        for jj in range(ny):
+            for ii in range(nx):
+                if (ii, jj) in obstacles:
+                    u_x = 0
+                    u_y = 0
+                    u = 0
+
+                    pressure = density * c_sq
+                else:
+                    local_density = 0.
+                    for kk in range(NSPEEDS):
+                        local_density += cells[ii][jj][kk]
+                    # compute x velocity component
+                    u_x = (
+                                 cells[ii][jj][1] + cells[ii][jj][5] +
+                                 cells[ii][jj][8] - (
+                                         cells[ii][jj][3] +
+                                         cells[ii][jj][6] +
+                                         cells[ii][jj][7]
+                                 )
+                         ) / local_density
+                    # compute y velocity component
+                    u_y = (
+                                  cells[ii][jj][2] +
+                                  cells[ii][jj][5] +
+                                  cells[ii][jj][6] - (
+                                          cells[ii][jj][4] +
+                                          cells[ii][jj][7] +
+                                          cells[ii][jj][8]
+                                  )
+                          ) / local_density
+
+                    # compute norm of velocity
+                    u = sqrt((u_x * u_x) + (u_y * u_y))
+                    # compute pressure
+                    pressure = local_density * c_sq
+            f.write(f"{ii} {jj} {u_x} {u_y} {u} {pressure} {1 if (ii, jj) in obstacles else 0}")
+
+    with open(AVVELSFILE, "w") as f:
+        for ii in range(maxIters):
+            f.write(f"{ii} {av_vels[ii]}")
 
 
 def av_velocity(cells, obstacles, nx, ny):
@@ -75,26 +157,26 @@ def av_velocity(cells, obstacles, nx, ny):
 
     for jj in range(ny):
         for ii in range(nx):
-            if not obstacles[ii + jj * nx]:
+            if not obstacles[ii][jj]:
                 local_density = 0.
                 for kk in range(NSPEEDS):
-                    local_density += cells[ii + jj * nx].speeds[kk]
+                    local_density += cells[ii][jj][kk]
 
                 # x-component of velocity
                 u_x = (
-                              cells[ii + jj * nx].speeds[1] + cells[ii + jj * nx].speeds[5] +
-                              cells[ii + jj * nx].speeds[8] - (
-                                      cells[ii + jj * nx].speeds[3] + cells[ii + jj * nx].speeds[6] +
-                                      cells[ii + jj * nx].speeds[7]
+                              cells[ii][jj][1] + cells[ii][jj][5] +
+                              cells[ii][jj][8] - (
+                                      cells[ii][jj][3] + cells[ii][jj][6] +
+                                      cells[ii][jj][7]
                               )
                       ) / local_density
                 # compute y velocity component
 
                 u_y = (
-                              cells[ii + jj * nx].speeds[2] + cells[ii + jj * nx].speeds[5] +
-                              cells[ii + jj * nx].speeds[6] - (
-                                      cells[ii + jj * nx].speeds[4] + cells[ii + jj * nx].speeds[7] +
-                                      cells[ii + jj * nx].speeds[8]
+                              cells[ii][jj][2] + cells[ii][jj][5] +
+                              cells[ii][jj][6] - (
+                                      cells[ii][jj][4] + cells[ii][jj][7] +
+                                      cells[ii][jj][8]
                               )
                       ) / local_density
                 # accumulate the norm of x- and y- velocity components
@@ -109,7 +191,7 @@ def total_density(cells, nx, ny):
     for jj in range(ny):
         for ii in range(nx):
             for kk in range(NSPEEDS):
-                total += cells[ii + jj * nx].speeds[kk]
+                total += cells[ii][jj][kk]
 
 
 def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
@@ -129,18 +211,18 @@ def accelerate_flow(cells, obstacles, density, accel, nx, ny):
     jj = ny - 2
     for ii in range(nx):
         # if the cell is not occupied, and we don't send a negative density
-        if (not obstacles[ii + jj * nx]) and \
-                (cells[ii + jj * nx][3] - w1) > 0 and \
-                (cells[ii + jj * nx][6] - w2) > 0 and \
-                (cells[ii + jj * nx][7] - w2) > 0:
+        if (ii, jj) not in obstacles and \
+                (cells[ii][jj][3] - w1) > 0 and \
+                (cells[ii][jj][6] - w2) > 0 and \
+                (cells[ii][jj][7] - w2) > 0:
             # increase 'east-side' densities
-            cells[ii + jj * nx][1] += w1
-            cells[ii + jj * nx][5] += w2
-            cells[ii + jj * nx][8] += w2
+            cells[ii][jj][1] += w1
+            cells[ii][jj][5] += w2
+            cells[ii][jj][8] += w2
             # decrease 'west-side' densities
-            cells[ii + jj * nx][3] -= w1
-            cells[ii + jj * nx][6] -= w2
-            cells[ii + jj * nx][7] -= w2
+            cells[ii][jj][3] -= w1
+            cells[ii][jj][6] -= w2
+            cells[ii][jj][7] -= w2
 
 
 def propagate(cells, tmp_cells, nx, ny):
@@ -149,36 +231,37 @@ def propagate(cells, tmp_cells, nx, ny):
         for ii in range(nx):
             y_n = (jj + 1) % ny
             x_e = (ii + 1) % nx
-            y_s = (jj + ny - 1) if (jj == 0) else (jj - 1)
-            x_w = (ii + nx - 1) if (ii == 0) else (ii - 1)
+            y_s = (ny - 1) if jj == 0 else jj - 1
+            x_w = (nx - 1) if ii == 0 else ii - 1
+
             # propagate densities from neighbouring cells, following
             # appropriate directions of  travel and writing into
             # scratch space grid
 
-            tmp_cells[ii + jj * nx][0] = cells[ii + jj * nx][0]
-            tmp_cells[ii + jj * nx][1] = cells[x_w + jj * nx][1]
-            tmp_cells[ii + jj * nx][2] = cells[ii + y_s * nx][2]
-            tmp_cells[ii + jj * nx][3] = cells[x_e + jj * nx][3]
-            tmp_cells[ii + jj * nx][4] = cells[ii + y_n * nx][4]
-            tmp_cells[ii + jj * nx][5] = cells[x_w + y_s * nx][5]
-            tmp_cells[ii + jj * nx][6] = cells[x_e + y_s * nx][6]
-            tmp_cells[ii + jj * nx][7] = cells[x_e + y_n * nx][7]
-            tmp_cells[ii + jj * nx][8] = cells[x_w + y_n * nx][8]
+            tmp_cells[ii][jj][0] = cells[ii][jj][0]
+            tmp_cells[ii][jj][1] = cells[x_e][jj][1]
+            tmp_cells[ii][jj][2] = cells[ii][y_n][2]
+            tmp_cells[ii][jj][3] = cells[x_w][jj][3]
+            tmp_cells[ii][jj][4] = cells[ii][y_s][4]
+            tmp_cells[ii][jj][5] = cells[x_e][y_n][5]
+            tmp_cells[ii][jj][6] = cells[x_w][y_n][6]
+            tmp_cells[ii][jj][7] = cells[x_w][y_s][7]
+            tmp_cells[ii][jj][8] = cells[x_e][y_s][8]
 
 
 def rebound(cells, tmp_cells, obstacles, nx, ny):
     for jj in range(ny):
         for ii in range(nx):
-            if obstacles[jj*nx + ii]:
+            if (ii, jj) in obstacles:
                 # called after propagate, so taking values from scratch space
-                cells[ii + jj * nx][1] = tmp_cells[ii + jj * nx][3]
-                cells[ii + jj * nx][2] = tmp_cells[ii + jj * nx][4]
-                cells[ii + jj * nx][3] = tmp_cells[ii + jj * nx][1]
-                cells[ii + jj * nx][4] = tmp_cells[ii + jj * nx][2]
-                cells[ii + jj * nx][5] = tmp_cells[ii + jj * nx][7]
-                cells[ii + jj * nx][6] = tmp_cells[ii + jj * nx][8]
-                cells[ii + jj * nx][7] = tmp_cells[ii + jj * nx][5]
-                cells[ii + jj * nx][8] = tmp_cells[ii + jj * nx][6]
+                cells[ii][jj][1] = tmp_cells[ii][jj][3]
+                cells[ii][jj][2] = tmp_cells[ii][jj][4]
+                cells[ii][jj][3] = tmp_cells[ii][jj][1]
+                cells[ii][jj][4] = tmp_cells[ii][jj][2]
+                cells[ii][jj][5] = tmp_cells[ii][jj][7]
+                cells[ii][jj][6] = tmp_cells[ii][jj][8]
+                cells[ii][jj][7] = tmp_cells[ii][jj][5]
+                cells[ii][jj][8] = tmp_cells[ii][jj][6]
 
 
 def collision(cells, tmp_cells, obstacles, nx, ny, omega):
@@ -197,35 +280,35 @@ def collision(cells, tmp_cells, obstacles, nx, ny, omega):
     for jj in range(ny):
         # pragma omp parallel for
         for ii in range(nx):
-            if not obstacles[ii + jj * nx]:
+            if not obstacles[ii][jj]:
                 # compute local density total
                 local_density = 0.
 
                 # pragma omp parallel for
                 for kk in range(NSPEEDS):
-                    local_density += tmp_cells[ii + jj * nx][kk]
+                    local_density += tmp_cells[ii][jj][kk]
 
                 # compute x velocity component
                 u_x = (
-                              tmp_cells[ii + jj * nx][1]
-                              + tmp_cells[ii + jj * nx][5]
-                              + tmp_cells[ii + jj * nx][8]
+                              tmp_cells[ii][jj][1]
+                              + tmp_cells[ii][jj][5]
+                              + tmp_cells[ii][jj][8]
                               - (
-                                      tmp_cells[ii + jj * nx][3]
-                                      + tmp_cells[ii + jj * nx][6]
-                                      + tmp_cells[ii + jj * nx][7]
+                                      tmp_cells[ii][jj][3]
+                                      + tmp_cells[ii][jj][6]
+                                      + tmp_cells[ii][jj][7]
                               )
                       ) / local_density
 
                 # compute y velocity component
                 u_y = (
-                              tmp_cells[ii + jj * nx][2]
-                              + tmp_cells[ii + jj * nx][5]
-                              + tmp_cells[ii + jj * nx][6]
+                              tmp_cells[ii][jj][2]
+                              + tmp_cells[ii][jj][5]
+                              + tmp_cells[ii][jj][6]
                               - (
-                                      tmp_cells[ii + jj * nx][4]
-                                      + tmp_cells[ii + jj * nx][7]
-                                      + tmp_cells[ii + jj * nx][8]
+                                      tmp_cells[ii][jj][4]
+                                      + tmp_cells[ii][jj][7]
+                                      + tmp_cells[ii][jj][8]
                               )
                       ) / local_density
 
@@ -270,9 +353,9 @@ def collision(cells, tmp_cells, obstacles, nx, ny, omega):
 
                 # relaxation step
                 for kk in range(NSPEEDS):
-                    cells[ii + jj * nx][kk] = tmp_cells[ii + jj * nx][kk] + omega * (
-                            d_equ[kk] - tmp_cells[ii + jj * nx][kk])
+                    cells[ii][jj][kk] = tmp_cells[ii][jj][kk] + omega * (
+                            d_equ[kk] - tmp_cells[ii][jj][kk])
 
 
 if __name__ == "__main__":
-    pass
+    main()
