@@ -1,14 +1,13 @@
-from numba import njit, stencil, prange
 from argparse import ArgumentParser
 from math import sqrt
-from sys import argv
 
 import coloredlogs
 import logging
-import numpy as np
 import time
 import os
 import sys
+
+from sys import argv
 
 NSPEEDS = 9
 FINALSTATEFILE = "final_state.dat"
@@ -17,9 +16,9 @@ AVVELSFILE = "av_vels.dat"
 
 logging.basicConfig(encoding='utf-8', level=logging.DEBUG)
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 coloredlogs.DEFAULT_FIELD_STYLES["levelname"]["color"] = "cyan"
-coloredlogs.install(logger=logger, level=logging.INFO)
+coloredlogs.install(logger=logger, level=logging.DEBUG)
 
 
 class ProjectParser(ArgumentParser):
@@ -45,7 +44,7 @@ def read_obstacle_file(file_path):
     with open(file_path, 'r') as f:
         for line in f:
             x, y, b = line.split()
-            block.add((int(x), int(y)))
+            block.add((x, y))
     return block
 
 
@@ -72,11 +71,9 @@ def main():
     reynolds_dim = param["reynolds_dim"]
 
     # main_grid
-    cells = np.array([[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)], dtype=np.float32)
-    tmp_cells = np.zeros((ny, nx, NSPEEDS), dtype=np.float32)
-    obstacles = np.zeros((ny, nx), dtype=np.bool_)
-    for x, y in block:
-            obstacles[x,y] = 1
+    cells = [[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)]
+    tmp_cells = [[[0.0] * NSPEEDS for _ in range(nx)] for _ in range(ny)]
+    obstacles = [[1 if (x, y) in block else 0 for x in range(nx)] for y in range(ny)]
     av_vels = [0.0] * param["maxIters"]
 
     logger.debug(param)
@@ -85,12 +82,12 @@ def main():
     comp_tic = time.time_ns()
 
     for tt in range(param["maxIters"]):
-        logger.info("==Start step==")
+        logger.debug("==Start step==")
         timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega)
         av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
-        logger.info(f"==timestep: {tt}==")
-        logger.info(f"ev velocity: {av_vels[tt]}")
-        logger.info(f"tot density: {total_density(cells, nx, ny)}")
+        logger.debug(f"==timestep: {tt}==")
+        logger.debug(f"ev velocity: {av_vels[tt]}")
+        logger.debug(f"tot density: {total_density(cells, nx, ny)}")
 
     comp_toc = time.time_ns()
     col_tic = time.time_ns()
@@ -119,7 +116,7 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
     with open(FINALSTATEFILE, "w") as f:
         for jj in range(ny):
             for ii in range(nx):
-                if obstacles[ii, jj]:
+                if (ii, jj) in obstacles:
                     u_x = 0
                     u_y = 0
                     u = 0
@@ -153,7 +150,7 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
                     u = sqrt((u_x * u_x) + (u_y * u_y))
                     # compute pressure
                     pressure = local_density * c_sq
-            f.write(f"{ii} {jj} {u_x} {u_y} {u} {pressure} {obstacles[ii, jj]}")
+            f.write(f"{ii} {jj} {u_x} {u_y} {u} {pressure} {1 if (ii, jj) in obstacles else 0}")
 
     with open(AVVELSFILE, "w") as f:
         for ii in range(maxIters):
@@ -212,8 +209,8 @@ def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
     rebound(cells, tmp_cells, obstacles, nx, ny)
     collision(cells, tmp_cells, obstacles, nx, ny, omega)
 
-@njit
-def accelerate_flow(cells: np.array, obstacles: np.array, density, accel, nx, ny):
+
+def accelerate_flow(cells, obstacles, density, accel, nx, ny):
     # compute weighting factors
     w1 = density * accel / 9.
     w2 = density * accel / 36.
@@ -222,7 +219,7 @@ def accelerate_flow(cells: np.array, obstacles: np.array, density, accel, nx, ny
     jj = ny - 2
     for ii in range(nx):
         # if the cell is not occupied, and we don't send a negative density
-        if not obstacles[ii][jj] and \
+        if (ii, jj) not in obstacles and \
                 (cells[ii][jj][3] - w1) > 0 and \
                 (cells[ii][jj][6] - w2) > 0 and \
                 (cells[ii][jj][7] - w2) > 0:
@@ -236,7 +233,6 @@ def accelerate_flow(cells: np.array, obstacles: np.array, density, accel, nx, ny
             cells[ii][jj][7] -= w2
 
 
-@njit
 def propagate(cells, tmp_cells, nx, ny):
     """TODO Optimize and parallelize"""
     for jj in range(ny):
@@ -260,11 +256,11 @@ def propagate(cells, tmp_cells, nx, ny):
             tmp_cells[ii][jj][7] = cells[x_w][y_s][7]
             tmp_cells[ii][jj][8] = cells[x_e][y_s][8]
 
-@njit
+
 def rebound(cells, tmp_cells, obstacles, nx, ny):
     for jj in range(ny):
         for ii in range(nx):
-            if obstacles[ii, jj]:
+            if (ii, jj) in obstacles:
                 # called after propagate, so taking values from scratch space
                 cells[ii][jj][1] = tmp_cells[ii][jj][3]
                 cells[ii][jj][2] = tmp_cells[ii][jj][4]
@@ -276,7 +272,6 @@ def rebound(cells, tmp_cells, obstacles, nx, ny):
                 cells[ii][jj][8] = tmp_cells[ii][jj][6]
 
 
-# @njit
 def collision(cells, tmp_cells, obstacles, nx, ny, omega):
     """TODO Optimize and parallelize
     loop over the cells in the grid
