@@ -203,14 +203,6 @@ def total_density(cells, nx, ny):
 
 def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
     """One step elapse"""
-    accelerate_flow(cells, obstacles, density, accel, nx, ny)
-    propagate(cells, tmp_cells, nx, ny)
-    rebound(cells, tmp_cells, obstacles, nx, ny)
-    collision(cells, tmp_cells, obstacles, nx, ny, omega)
-
-@njit
-def accelerate_flow(cells: np.array, obstacles: np.array, density, accel, nx, ny):
-    # compute weighting factors
     w1 = density * accel / 9.
     w2 = density * accel / 36.
 
@@ -231,10 +223,6 @@ def accelerate_flow(cells: np.array, obstacles: np.array, density, accel, nx, ny
             cells[ii][jj][6] -= w2
             cells[ii][jj][7] -= w2
 
-
-@njit
-def propagate(cells, tmp_cells, nx, ny):
-    """TODO Optimize and parallelize"""
     for jj in range(ny):
         for ii in range(nx):
             y_n = (jj + 1) % ny
@@ -256,8 +244,6 @@ def propagate(cells, tmp_cells, nx, ny):
             tmp_cells[ii][jj][7] = cells[x_w][y_s][7]
             tmp_cells[ii][jj][8] = cells[x_e][y_s][8]
 
-@njit
-def rebound(cells, tmp_cells, obstacles, nx, ny):
     for jj in prange(ny):
         for ii in range(nx):
             if obstacles[ii, jj]:
@@ -270,15 +256,6 @@ def rebound(cells, tmp_cells, obstacles, nx, ny):
                 cells[ii][jj][6] = tmp_cells[ii][jj][8]
                 cells[ii][jj][7] = tmp_cells[ii][jj][5]
                 cells[ii][jj][8] = tmp_cells[ii][jj][6]
-
-
-@njit
-def collision(cells: np.array, tmp_cells: np.array, obstacles: np.array, nx: int, ny: int, omega: np.float32):
-    """TODO Optimize and parallelize
-    loop over the cells in the grid
-    NB the collision step is called after
-    the propagate step and so values of interest
-    are in the scratch-space grid"""
 
     c_sq = 1. / 3.  # square of speed of sound
     w0 = 4. / 9.  # weighting factor
