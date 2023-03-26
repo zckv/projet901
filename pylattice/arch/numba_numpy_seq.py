@@ -164,12 +164,14 @@ def av_velocity(cells, obstacles, nx, ny):
     """TODO"""
     tot_cells = 0
     tot_u = 0.
+
     for jj in range(ny):
         for ii in range(nx):
             if not obstacles[ii][jj]:
                 local_density = 0.
                 for kk in range(NSPEEDS):
                     local_density += cells[ii][jj][kk]
+
                 # x-component of velocity
                 u_x = (
                               cells[ii][jj][1] + cells[ii][jj][5] +
@@ -179,6 +181,7 @@ def av_velocity(cells, obstacles, nx, ny):
                               )
                       ) / local_density
                 # compute y velocity component
+
                 u_y = (
                               cells[ii][jj][2] + cells[ii][jj][5] +
                               cells[ii][jj][6] - (
@@ -191,6 +194,7 @@ def av_velocity(cells, obstacles, nx, ny):
                 # increase counter of inspected cells
                 tot_cells += 1
     return tot_u / tot_cells
+
 
 def total_density(cells, nx, ny):
     total = 0.
