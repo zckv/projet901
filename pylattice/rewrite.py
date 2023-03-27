@@ -200,31 +200,38 @@ def total_density(cells, nx, ny):
                 total += cells[ii][jj][kk]
     return total
 
-
+@njit(parallel=True)
 def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
     """One step elapse"""
-    w1 = density * accel / 9.
-    w2 = density * accel / 36.
+    c_sq = 1. / 3.  # square of speed of sound
+    w0 = 4. / 9.  # weighting factor
+    w1 = 1. / 9.  # weighting factor
+    w2 = 1. / 36.  # weighting factor
 
-    # modify the 2nd row of the grid
-    jj = ny - 2
+    u = np.zeros((NSPEEDS), dtype=np.float32)
+    d_equ = np.zeros((NSPEEDS), dtype=np.float32)
+
+    w3 = density * accel / 9.
+    w4 = density * accel / 36.
+
     for ii in range(nx):
-        # if the cell is not occupied, and we don't send a negative density
-        if not obstacles[ii][jj] and \
-                (cells[ii][jj][3] - w1) > 0 and \
-                (cells[ii][jj][6] - w2) > 0 and \
-                (cells[ii][jj][7] - w2) > 0:
+        if not obstacles[ii][ny-2] and \
+            (cells[ii][ny-2][3] - w3) > 0 and \
+            (cells[ii][ny-2][6] - w4) > 0 and \
+            (cells[ii][ny-2][7] - w4) > 0:
             # increase 'east-side' densities
-            cells[ii][jj][1] += w1
-            cells[ii][jj][5] += w2
-            cells[ii][jj][8] += w2
+            cells[ii][ny-2][1] += w3
+            cells[ii][ny-2][5] += w4
+            cells[ii][ny-2][8] += w4
             # decrease 'west-side' densities
-            cells[ii][jj][3] -= w1
-            cells[ii][jj][6] -= w2
-            cells[ii][jj][7] -= w2
+            cells[ii][ny-2][3] -= w3
+            cells[ii][ny-2][6] -= w4
+            cells[ii][ny-2][7] -= w4
+
 
     for jj in range(ny):
         for ii in range(nx):
+
             y_n = (jj + 1) % ny
             x_e = (ii + 1) % nx
             y_s = (ny - 1) if jj == 0 else jj - 1
@@ -244,7 +251,9 @@ def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
             tmp_cells[ii][jj][7] = cells[x_w][y_s][7]
             tmp_cells[ii][jj][8] = cells[x_e][y_s][8]
 
-    for jj in prange(ny):
+    # pragma omp parallel for
+    for jj in range(ny):
+        # pragma omp parallel for
         for ii in range(nx):
             if obstacles[ii, jj]:
                 # called after propagate, so taking values from scratch space
@@ -256,20 +265,7 @@ def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
                 cells[ii][jj][6] = tmp_cells[ii][jj][8]
                 cells[ii][jj][7] = tmp_cells[ii][jj][5]
                 cells[ii][jj][8] = tmp_cells[ii][jj][6]
-
-    c_sq = 1. / 3.  # square of speed of sound
-    w0 = 4. / 9.  # weighting factor
-    w1 = 1. / 9.  # weighting factor
-    w2 = 1. / 36.  # weighting factor
-
-    u = np.zeros((NSPEEDS), dtype=np.float32)
-    d_equ = np.zeros((NSPEEDS), dtype=np.float32)
-
-    # pragma omp parallel for
-    for jj in range(ny):
-        # pragma omp parallel for
-        for ii in range(nx):
-            if not obstacles[ii][jj]:
+            else:
                 # compute local density total
                 local_density = 0.
 
