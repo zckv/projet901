@@ -49,7 +49,7 @@ else
     make -s clean
     cat <<-EOM
 
-	Submission check passed. 
+	Submission check passed.
 
 	Please ensure that you submit all source files in the submission directory:
 	    - Makefile

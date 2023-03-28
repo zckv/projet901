@@ -56,8 +56,6 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 
-#define DEBUG 1
-
 #define NSPEEDS         9
 #define FINALSTATEFILE  "final_state.dat"
 #define INITIALSTATEFILE  "initial_state.dat"

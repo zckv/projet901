@@ -73,7 +73,6 @@ def main():
 
     # main_grid
     cells = np.array([[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)], dtype=np.float32)
-    tmp_cells = np.zeros((ny, nx, NSPEEDS), dtype=np.float32)
     obstacles = np.zeros((ny, nx), dtype=np.bool_)
     for x, y in block:
             obstacles[x,y] = 1
@@ -86,7 +85,7 @@ def main():
 
     for tt in range(param["maxIters"]):
         logger.info("==Start step==")
-        timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega)
+        timestep(cells, obstacles, nx, ny, density, accel, omega)
         av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
         logger.info(f"==timestep: {tt}==")
         logger.info(f"ev velocity: {av_vels[tt]}")
@@ -201,144 +200,85 @@ def total_density(cells, nx, ny):
     return total
 
 @njit(parallel=True)
-def timestep(cells, tmp_cells, obstacles, nx, ny, density, accel, omega):
+def timestep(cells, obstacles, nx, ny, density, accel, omega):
     """One step elapse"""
     c_sq = 1. / 3.  # square of speed of sound
     w0 = 4. / 9.  # weighting factor
     w1 = 1. / 9.  # weighting factor
     w2 = 1. / 36.  # weighting factor
+    w3 = density * accel / 9.
+    w4 = density * accel / 36.
+
+    tmp = cells.copy()
+    c = np.zeros(NSPEEDS, dtype=np.float32)
 
     u = np.zeros((NSPEEDS), dtype=np.float32)
     d_equ = np.zeros((NSPEEDS), dtype=np.float32)
 
-    w3 = density * accel / 9.
-    w4 = density * accel / 36.
-
-    for ii in range(nx):
-        if not obstacles[ii][ny-2] and \
-            (cells[ii][ny-2][3] - w3) > 0 and \
-            (cells[ii][ny-2][6] - w4) > 0 and \
-            (cells[ii][ny-2][7] - w4) > 0:
-            # increase 'east-side' densities
-            cells[ii][ny-2][1] += w3
-            cells[ii][ny-2][5] += w4
-            cells[ii][ny-2][8] += w4
-            # decrease 'west-side' densities
-            cells[ii][ny-2][3] -= w3
-            cells[ii][ny-2][6] -= w4
-            cells[ii][ny-2][7] -= w4
-
-
     for jj in range(ny):
         for ii in range(nx):
-
+            # accelerate and propagate
             y_n = (jj + 1) % ny
             x_e = (ii + 1) % nx
             y_s = (ny - 1) if jj == 0 else jj - 1
             x_w = (nx - 1) if ii == 0 else ii - 1
 
-            # propagate densities from neighbouring cells, following
-            # appropriate directions of  travel and writing into
-            # scratch space grid
+            w3c = (w3 if jj == ny -2 else 0)
+            w4cn = (w4 if y_n == ny - 2 else 0)
+            w4cs = (w4 if y_s == ny - 2 else 0)
 
-            tmp_cells[ii][jj][0] = cells[ii][jj][0]
-            tmp_cells[ii][jj][1] = cells[x_e][jj][1]
-            tmp_cells[ii][jj][2] = cells[ii][y_n][2]
-            tmp_cells[ii][jj][3] = cells[x_w][jj][3]
-            tmp_cells[ii][jj][4] = cells[ii][y_s][4]
-            tmp_cells[ii][jj][5] = cells[x_e][y_n][5]
-            tmp_cells[ii][jj][6] = cells[x_w][y_n][6]
-            tmp_cells[ii][jj][7] = cells[x_w][y_s][7]
-            tmp_cells[ii][jj][8] = cells[x_e][y_s][8]
+            c[0] = tmp[ii][jj][0]
+            c[1] = tmp[x_e][jj][1] + w3c
+            c[2] = tmp[ii][y_n][2]
+            c[3] = tmp[x_w][jj][3] - w3c
+            c[4] = tmp[ii][y_s][4]
+            c[5] = tmp[x_e][y_n][5] + w4cn
+            c[6] = tmp[x_w][y_n][6] - w4cn
+            c[7] = tmp[x_w][y_s][7] - w4cs
+            c[8] = tmp[x_e][y_s][8] + w4cs
 
-    # pragma omp parallel for
-    for jj in range(ny):
-        # pragma omp parallel for
-        for ii in range(nx):
+            # rebound and collision
             if obstacles[ii, jj]:
-                # called after propagate, so taking values from scratch space
-                cells[ii][jj][1] = tmp_cells[ii][jj][3]
-                cells[ii][jj][2] = tmp_cells[ii][jj][4]
-                cells[ii][jj][3] = tmp_cells[ii][jj][1]
-                cells[ii][jj][4] = tmp_cells[ii][jj][2]
-                cells[ii][jj][5] = tmp_cells[ii][jj][7]
-                cells[ii][jj][6] = tmp_cells[ii][jj][8]
-                cells[ii][jj][7] = tmp_cells[ii][jj][5]
-                cells[ii][jj][8] = tmp_cells[ii][jj][6]
+                cells[ii][jj][1] = c[3]
+                cells[ii][jj][2] = c[4]
+                cells[ii][jj][3] = c[1]
+                cells[ii][jj][4] = c[2]
+                cells[ii][jj][5] = c[7]
+                cells[ii][jj][6] = c[8]
+                cells[ii][jj][7] = c[5]
+                cells[ii][jj][8] = c[6]
             else:
-                # compute local density total
-                local_density = 0.
-
-                # pragma omp parallel for
-                for kk in range(NSPEEDS):
-                    local_density += tmp_cells[ii][jj][kk]
-
-                # compute x velocity component
-                u_x = (
-                              tmp_cells[ii][jj][1]
-                              + tmp_cells[ii][jj][5]
-                              + tmp_cells[ii][jj][8]
-                              - (
-                                      tmp_cells[ii][jj][3]
-                                      + tmp_cells[ii][jj][6]
-                                      + tmp_cells[ii][jj][7]
-                              )
-                      ) / local_density
-
-                # compute y velocity component
-                u_y = (
-                              tmp_cells[ii][jj][2]
-                              + tmp_cells[ii][jj][5]
-                              + tmp_cells[ii][jj][6]
-                              - (
-                                      tmp_cells[ii][jj][4]
-                                      + tmp_cells[ii][jj][7]
-                                      + tmp_cells[ii][jj][8]
-                              )
-                      ) / local_density
-
-                # velocity squared
+                ld =  c.sum()
+                u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
+                u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
                 u_sq = u_x * u_x + u_y * u_y
+                u_sq22 = 2 * c_sq * c_sq
+                uc_sq = u_sq / (2*c_sq)
 
-                # directional velocity components
-                u[1] = u_x
-                u[2] = u_y
-                u[3] = -u_x
-                u[4] = -u_y
-                u[5] = u_x + u_y
-                u[6] = -u_x + u_y
-                u[7] = -u_x - u_y
-                u[8] = u_x - u_y
+                u[1] = u_x / c_sq + (u_x * u_x) / u_sq22
+                u[2] = u_y / c_sq + (u_y * u_y) / u_sq22
+                u[3] = -u_x / c_sq + (-u_x * -u_x) / u_sq22
+                u[4] = -u_y / c_sq + (-u_y * -u_y) / u_sq22
+                u[5] = (u_x + u_y) / c_sq + ((u_x + u_y) * (u_x + u_y)) / u_sq22
+                u[6] = (-u_x + u_y) / c_sq + ((-u_x + u_y) * (-u_x + u_y)) / u_sq22
+                u[7] = (-u_x - u_y) / c_sq + ((-u_x - u_y) * (-u_x - u_y)) / u_sq22
+                u[8] = (u_x - u_y) / c_sq + ((u_x - u_y) * (u_x - u_y)) / u_sq22
 
                 # equilibrium densities
                 # zero velocity density: weight w0
-                d_equ[0] = w0 * local_density * (1. - u_sq / (2. * c_sq))
+                cells[ii][jj][0] = c[0] + omega * (w0 * ld * (1. - uc_sq) - c[0])
 
                 # axis speeds: weight w1 */
-                d_equ[1] = w1 * local_density * (
-                        1 + u[1] / c_sq + (u[1] * u[1]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-                d_equ[2] = w1 * local_density * (
-                        1 + u[2] / c_sq + (u[2] * u[2]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-                d_equ[3] = w1 * local_density * (
-                        1 + u[3] / c_sq + (u[3] * u[3]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-                d_equ[4] = w1 * local_density * (
-                        1 + u[4] / c_sq + (u[4] * u[4]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
+                cells[ii][jj][1] = c[1] + omega * (w1 * ld * (1 + u[1] - uc_sq) - c[1])
+                cells[ii][jj][2] = c[2] + omega * (w1 * ld * (1 + u[2] - uc_sq) - c[2])
+                cells[ii][jj][3] = c[3] + omega * (w1 * ld * (1 + u[3] - uc_sq) - c[3])
+                cells[ii][jj][4] = c[4] + omega * (w1 * ld * (1 + u[4] - uc_sq) - c[4])
 
                 # diagonal speeds: weight w2 */
-                d_equ[5] = w2 * local_density * (
-                        1 + u[5] / c_sq + (u[5] * u[5]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-                d_equ[6] = w2 * local_density * (
-                        1 + u[6] / c_sq + (u[6] * u[6]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-                d_equ[7] = w2 * local_density * (
-                        1 + u[7] / c_sq + (u[7] * u[7]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-                d_equ[8] = w2 * local_density * (
-                        1 + u[8] / c_sq + (u[8] * u[8]) / (2 * c_sq * c_sq) - u_sq / (2 * c_sq))
-
-                # relaxation step
-                for kk in range(NSPEEDS):
-                    cells[ii][jj][kk] = tmp_cells[ii][jj][kk] + omega * (
-                            d_equ[kk] - tmp_cells[ii][jj][kk])
-
+                cells[ii][jj][5] = c[5] + omega * (w2 * ld * (1 + u[5] - uc_sq) - c[5])
+                cells[ii][jj][6] = c[6] + omega * (w2 * ld * (1 + u[6] - uc_sq) - c[6])
+                cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
+                cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
 
 if __name__ == "__main__":
     main()
