@@ -84,12 +84,12 @@ def main():
     comp_tic = time.time_ns()
 
     for tt in range(param["maxIters"]):
-        logger.info("==Start step==")
+        # logger.info("==Start step==")
         timestep(cells, obstacles, nx, ny, density, accel, omega)
-        av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
+        # av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
         logger.info(f"==timestep: {tt}==")
-        logger.info(f"ev velocity: {av_vels[tt]}")
-        logger.info(f"tot density: {total_density(cells, nx, ny)}")
+        # logger.info(f"ev velocity: {av_vels[tt]}")
+        # logger.info(f"tot density: {total_density(cells, nx, ny)}")
 
     comp_toc = time.time_ns()
     col_tic = time.time_ns()
