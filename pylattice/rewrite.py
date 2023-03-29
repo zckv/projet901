@@ -17,9 +17,9 @@ AVVELSFILE = "av_vels.dat"
 
 logging.basicConfig(encoding='utf-8', level=logging.DEBUG)
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 coloredlogs.DEFAULT_FIELD_STYLES["levelname"]["color"] = "cyan"
-coloredlogs.install(logger=logger, level=logging.INFO)
+coloredlogs.install(logger=logger, level=logging.WARNING)
 
 
 class ProjectParser(ArgumentParser):
@@ -57,8 +57,8 @@ def main():
     param = read_input_file(argv[1])
     block = read_obstacle_file(argv[2])
 
-    tot_tic = time.time_ns()
-    init_tic = time.time_ns()
+    tot_tic = time.time()
+    init_tic = time.time()
 
     w0 = param["density"] * 4 / 9
     w1 = param["density"] / 9
@@ -80,30 +80,30 @@ def main():
 
     logger.debug(param)
 
-    init_toc = time.time_ns()
-    comp_tic = time.time_ns()
+    init_toc = time.time()
+    comp_tic = time.time()
 
     for tt in range(param["maxIters"]):
-        # logger.info("==Start step==")
+        logger.info("==Start step==")
         timestep(cells, obstacles, nx, ny, density, accel, omega)
-        # av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
+#        av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
         logger.info(f"==timestep: {tt}==")
-        # logger.info(f"ev velocity: {av_vels[tt]}")
-        # logger.info(f"tot density: {total_density(cells, nx, ny)}")
+#        logger.info(f"ev velocity: {av_vels[tt]}")
+#        logger.info(f"tot density: {total_density(cells, nx, ny)}")
 
-    comp_toc = time.time_ns()
-    col_tic = time.time_ns()
+    comp_toc = time.time()
+    col_tic = time.time()
 
     # TODO collate data here
 
-    col_toc = time.time_ns()
-    tot_toc = time.time_ns()
+    col_toc = time.time()
+    tot_toc = time.time()
 
     print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
-    print(f"Elapsed Init time:\t\t\t{init_toc - init_tic}")
-    print(f"Elapsed Compute time:\t\t\t{comp_toc - comp_tic}")
-    print(f"Elapsed Collate time:\t\t\t{col_toc - col_tic}")
-    print(f"Elapsed Total time:\t\t\t{tot_toc - tot_tic}")
+    print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
+    print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
+    print(f"Elapsed Collate time:\t\t{col_toc - col_tic} seconds")
+    print(f"Elapsed Total time:\t\t{tot_toc - tot_tic} seconds")
 
     write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
 
@@ -125,9 +125,7 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
 
                     pressure = density * c_sq
                 else:
-                    local_density = 0.
-                    for kk in range(NSPEEDS):
-                        local_density += cells[ii][jj][kk]
+                    local_density = cells[ii][jj].sum()
                     # compute x velocity component
                     u_x = (
                                  cells[ii][jj][1] + cells[ii][jj][5] +
@@ -152,13 +150,14 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
                     u = sqrt((u_x * u_x) + (u_y * u_y))
                     # compute pressure
                     pressure = local_density * c_sq
-            f.write(f"{ii} {jj} {u_x} {u_y} {u} {pressure} {obstacles[ii, jj]}")
+                f.write(f"{ii} {jj} {u_x} {u_y} {u} {pressure} {int(obstacles[ii, jj])}\n")
 
     with open(AVVELSFILE, "w") as f:
         for ii in range(maxIters):
-            f.write(f"{ii} {av_vels[ii]}")
+            f.write(f"{ii} {av_vels[ii]}\n")
 
 
+@njit(parallel=True)
 def av_velocity(cells, obstacles, nx, ny):
     """TODO"""
     tot_cells = 0
@@ -166,9 +165,7 @@ def av_velocity(cells, obstacles, nx, ny):
     for jj in range(ny):
         for ii in range(nx):
             if not obstacles[ii][jj]:
-                local_density = 0.
-                for kk in range(NSPEEDS):
-                    local_density += cells[ii][jj][kk]
+                local_density =  cells[ii][jj].sum()
                 # x-component of velocity
                 u_x = (
                               cells[ii][jj][1] + cells[ii][jj][5] +
@@ -191,13 +188,10 @@ def av_velocity(cells, obstacles, nx, ny):
                 tot_cells += 1
     return tot_u / tot_cells
 
+
+@njit(parallel=True)
 def total_density(cells, nx, ny):
-    total = 0.
-    for jj in range(ny):
-        for ii in range(nx):
-            for kk in range(NSPEEDS):
-                total += cells[ii][jj][kk]
-    return total
+    return cells.sum()
 
 @njit(parallel=True)
 def timestep(cells, obstacles, nx, ny, density, accel, omega):
@@ -210,13 +204,13 @@ def timestep(cells, obstacles, nx, ny, density, accel, omega):
     w4 = density * accel / 36.
 
     tmp = cells.copy()
-    c = np.zeros(NSPEEDS, dtype=np.float32)
 
-    u = np.zeros((NSPEEDS), dtype=np.float32)
-    d_equ = np.zeros((NSPEEDS), dtype=np.float32)
+    for jj in prange(ny):
+        for ii in prange(nx):
+            # init in parallel sec
+            c = np.zeros((NSPEEDS), dtype=np.float32)
+            u = np.zeros((NSPEEDS), dtype=np.float32)
 
-    for jj in range(ny):
-        for ii in range(nx):
             # accelerate and propagate
             y_n = (jj + 1) % ny
             x_e = (ii + 1) % nx
