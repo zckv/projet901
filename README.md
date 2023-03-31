@@ -30,6 +30,8 @@ X le nombres de processus à lancer
 
 Il est possible de vérifier les résultats avec le script fourni:
 ```
-poetry run python files/check/check.py --ref-av-vels-file=files/av_vels.dat --ref-final-state-file=files/final_state.dat --av-vels-file=av_vels.dat --final-state-file=final_state.dat
+poetry run python files/check/check.py --ref-av-vels-file=ref_av_vels.dat --ref-final-state-file=ref_final_state.dat --av-vels-file=av_vels.dat --final-state-file=final_state.dat
 ```
+!! Je n'ai pas inclus les fichiers de référence !! 
+
 
