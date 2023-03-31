@@ -15,7 +15,7 @@ FINALSTATEFILE = "final_state.dat"
 INITIALSTATEFILE = "initial_state.dat"
 AVVELSFILE = "av_vels.dat"
 
-logging.basicConfig(encoding='utf-8', level=logging.DEBUG)
+logging.basicConfig(encoding="utf-8", level=logging.DEBUG)
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
 logger.setLevel(logging.WARNING)
 coloredlogs.DEFAULT_FIELD_STYLES["levelname"]["color"] = "cyan"
@@ -24,12 +24,13 @@ coloredlogs.install(logger=logger, level=logging.WARNING)
 
 class ProjectParser(ArgumentParser):
     """Parse args from command line"""
+
     # TODO
 
 
 def read_input_file(file_path):
     d = {}
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         d["nx"] = int(f.readline())
         d["ny"] = int(f.readline())
         d["maxIters"] = int(f.readline())
@@ -42,7 +43,7 @@ def read_input_file(file_path):
 
 def read_obstacle_file(file_path):
     block = set()
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         for line in f:
             x, y, b = line.split()
             block.add((int(x), int(y)))
@@ -72,13 +73,16 @@ def main():
     reynolds_dim = param["reynolds_dim"]
 
     # main_grid
-    cells = np.array([[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)], dtype=np.float32)
+    cells = np.array(
+        [[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)],
+        dtype=np.float32,
+    )
     obstacles = np.zeros((ny, nx), dtype=np.bool_)
     for x, y in block:
-            obstacles[x,y] = 1
+        obstacles[x, y] = 1
     av_vels = [0.0] * param["maxIters"]
 
-#    g_cells =
+    #    g_cells =
 
     logger.debug(param)
 
@@ -88,10 +92,10 @@ def main():
     for tt in range(param["maxIters"]):
         logger.info("==Start step==")
         timestep(cells, obstacles, nx, ny, density, accel, omega)
-#        av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
+        #        av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
         logger.info(f"==timestep: {tt}==")
-#        logger.info(f"ev velocity: {av_vels[tt]}")
-#        logger.info(f"tot density: {total_density(cells, nx, ny)}")
+    #        logger.info(f"ev velocity: {av_vels[tt]}")
+    #        logger.info(f"tot density: {total_density(cells, nx, ny)}")
 
     comp_toc = time.time()
     col_tic = time.time()
@@ -101,7 +105,9 @@ def main():
     col_toc = time.time()
     tot_toc = time.time()
 
-    print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
+    print(
+        f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}"
+    )
     print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
     print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
     print(f"Elapsed Collate time:\t\t{col_toc - col_tic} seconds")
@@ -111,12 +117,12 @@ def main():
 
 
 def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
-    viscosity = 1. / 6. * (2. / omega - 1.)
+    viscosity = 1.0 / 6.0 * (2.0 / omega - 1.0)
     return av_velocity(cells, obstacles, nx, ny) * reynolds_dim / viscosity
 
 
 def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
-    c_sq = 1. / 3.
+    c_sq = 1.0 / 3.0
     with open(FINALSTATEFILE, "w") as f:
         for jj in range(ny):
             for ii in range(nx):
@@ -130,29 +136,26 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
                     local_density = cells[ii][jj].sum()
                     # compute x velocity component
                     u_x = (
-                                 cells[ii][jj][1] + cells[ii][jj][5] +
-                                 cells[ii][jj][8] - (
-                                         cells[ii][jj][3] +
-                                         cells[ii][jj][6] +
-                                         cells[ii][jj][7]
-                                 )
-                         ) / local_density
+                        cells[ii][jj][1]
+                        + cells[ii][jj][5]
+                        + cells[ii][jj][8]
+                        - (cells[ii][jj][3] + cells[ii][jj][6] + cells[ii][jj][7])
+                    ) / local_density
                     # compute y velocity component
                     u_y = (
-                                  cells[ii][jj][2] +
-                                  cells[ii][jj][5] +
-                                  cells[ii][jj][6] - (
-                                          cells[ii][jj][4] +
-                                          cells[ii][jj][7] +
-                                          cells[ii][jj][8]
-                                  )
-                          ) / local_density
+                        cells[ii][jj][2]
+                        + cells[ii][jj][5]
+                        + cells[ii][jj][6]
+                        - (cells[ii][jj][4] + cells[ii][jj][7] + cells[ii][jj][8])
+                    ) / local_density
 
                     # compute norm of velocity
                     u = sqrt((u_x * u_x) + (u_y * u_y))
                     # compute pressure
                     pressure = local_density * c_sq
-                f.write(f"{ii} {jj} {u_x} {u_y} {u} {pressure} {int(obstacles[ii, jj])}\n")
+                f.write(
+                    f"{ii} {jj} {u_x} {u_y} {u} {pressure} {int(obstacles[ii, jj])}\n"
+                )
 
     with open(AVVELSFILE, "w") as f:
         for ii in range(maxIters):
@@ -163,27 +166,25 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
 def av_velocity(cells, obstacles, nx, ny):
     """TODO"""
     tot_cells = 0
-    tot_u = 0.
+    tot_u = 0.0
     for jj in range(ny):
         for ii in range(nx):
             if not obstacles[ii][jj]:
-                local_density =  cells[ii][jj].sum()
+                local_density = cells[ii][jj].sum()
                 # x-component of velocity
                 u_x = (
-                              cells[ii][jj][1] + cells[ii][jj][5] +
-                              cells[ii][jj][8] - (
-                                      cells[ii][jj][3] + cells[ii][jj][6] +
-                                      cells[ii][jj][7]
-                              )
-                      ) / local_density
+                    cells[ii][jj][1]
+                    + cells[ii][jj][5]
+                    + cells[ii][jj][8]
+                    - (cells[ii][jj][3] + cells[ii][jj][6] + cells[ii][jj][7])
+                ) / local_density
                 # compute y velocity component
                 u_y = (
-                              cells[ii][jj][2] + cells[ii][jj][5] +
-                              cells[ii][jj][6] - (
-                                      cells[ii][jj][4] + cells[ii][jj][7] +
-                                      cells[ii][jj][8]
-                              )
-                      ) / local_density
+                    cells[ii][jj][2]
+                    + cells[ii][jj][5]
+                    + cells[ii][jj][6]
+                    - (cells[ii][jj][4] + cells[ii][jj][7] + cells[ii][jj][8])
+                ) / local_density
                 # accumulate the norm of x- and y- velocity components
                 tot_u += sqrt((u_x * u_x) + (u_y * u_y))
                 # increase counter of inspected cells
@@ -195,15 +196,16 @@ def av_velocity(cells, obstacles, nx, ny):
 def total_density(cells, nx, ny):
     return cells.sum()
 
+
 @njit(parallel=True)
 def timestep(cells, obstacles, nx, ny, density, accel, omega):
     """One step elapse"""
-    c_sq = 1. / 3.  # square of speed of sound
-    w0 = 4. / 9.  # weighting factor
-    w1 = 1. / 9.  # weighting factor
-    w2 = 1. / 36.  # weighting factor
-    w3 = density * accel / 9.
-    w4 = density * accel / 36.
+    c_sq = 1.0 / 3.0  # square of speed of sound
+    w0 = 4.0 / 9.0  # weighting factor
+    w1 = 1.0 / 9.0  # weighting factor
+    w2 = 1.0 / 36.0  # weighting factor
+    w3 = density * accel / 9.0
+    w4 = density * accel / 36.0
 
     tmp = cells.copy()
 
@@ -216,12 +218,14 @@ def timestep(cells, obstacles, nx, ny, density, accel, omega):
             # accelerate and propagate
             y_n = (jj + 1) % ny
             x_e = (ii + 1) % nx
-            y_s = (ny - 1) if jj == 0 else jj - 1 #  * ceil((jj)/(jj+1)) +  (jj - 1) * ceil((jj)/(jj+1) + 1 % 2)
+            y_s = (
+                (ny - 1) if jj == 0 else jj - 1
+            )  #  * ceil((jj)/(jj+1)) +  (jj - 1) * ceil((jj)/(jj+1) + 1 % 2)
             x_w = (nx - 1) if ii == 0 else ii - 1
 
-            w3c = (w3 if jj == ny -2 else 0)
-            w4cn = (w4 if y_n == ny - 2 else 0)
-            w4cs = (w4 if y_s == ny - 2 else 0)
+            w3c = w3 if jj == ny - 2 else 0
+            w4cn = w4 if y_n == ny - 2 else 0
+            w4cs = w4 if y_s == ny - 2 else 0
 
             c[0] = tmp[ii][jj][0]
             c[1] = tmp[x_e][jj][1] + w3c
@@ -244,12 +248,12 @@ def timestep(cells, obstacles, nx, ny, density, accel, omega):
                 cells[ii][jj][7] = c[5]
                 cells[ii][jj][8] = c[6]
             else:
-                ld =  c.sum()
+                ld = c.sum()
                 u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
                 u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
                 u_sq = u_x * u_x + u_y * u_y
                 u_sq22 = 2 * c_sq * c_sq
-                uc_sq = u_sq / (2*c_sq)
+                uc_sq = u_sq / (2 * c_sq)
 
                 u[1] = u_x / c_sq + (u_x * u_x) / u_sq22
                 u[2] = u_y / c_sq + (u_y * u_y) / u_sq22
@@ -262,7 +266,7 @@ def timestep(cells, obstacles, nx, ny, density, accel, omega):
 
                 # equilibrium densities
                 # zero velocity density: weight w0
-                cells[ii][jj][0] = c[0] + omega * (w0 * ld * (1. - uc_sq) - c[0])
+                cells[ii][jj][0] = c[0] + omega * (w0 * ld * (1.0 - uc_sq) - c[0])
 
                 # axis speeds: weight w1 */
                 cells[ii][jj][1] = c[1] + omega * (w1 * ld * (1 + u[1] - uc_sq) - c[1])
@@ -275,6 +279,7 @@ def timestep(cells, obstacles, nx, ny, density, accel, omega):
                 cells[ii][jj][6] = c[6] + omega * (w2 * ld * (1 + u[6] - uc_sq) - c[6])
                 cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
                 cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
+
 
 if __name__ == "__main__":
     main()
