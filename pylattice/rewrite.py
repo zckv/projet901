@@ -54,9 +54,6 @@ def read_obstacle_file(file_path):
 
 def main():
     # TODO initalization
-
-    logger.debug("==start program==")
-
     param = read_input_file(argv[1])
     block = read_obstacle_file(argv[2])
 
@@ -96,7 +93,6 @@ def main():
         timestep(
             cells,
             obstacles,
-      #       data_blk,
             start_blk,
             end_blk,
             nx,
@@ -105,27 +101,50 @@ def main():
             accel,
             omega
         )
-        # exchange_halos(cells)
-        collat_cells(cells, nx)
-        if nm.rank() == 0:
-            av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
-            logger.info(f"==timestep: {tt}==")
-            logger.info(f"ev velocity: {av_vels[tt]}")
-            logger.info(f"tot density: {total_density(cells, nx, ny)}")
+        exchange_halos(cells, nx)
+        av_vels[tt] = av_velocity(cells, obstacles, nx, ny, start_blk, end_blk)
+        av_vels[tt] = exchange_av_vel(av_vels[tt])
+        # if nm.rank() == 0:
+        #    logger.info(f"==timestep: {tt}==")
+        #    logger.info(f"ev velocity: {av_vels[tt]}")
+        #    logger.info(f"tot density: {total_density(cells, nx, ny)}")
 
     comp_toc = time.time()
+    col_tic = time.time()
+
+    collat_cells(cells, nx)
+
+    col_toc = time.time()
     tot_toc = time.time()
 
-    print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
-    print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
-    print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
-    print(f"Elapsed Total time:\t\t{tot_toc - tot_tic} seconds")
 
-    write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
+    if nm.rank() == 0:
+        print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
+        print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
+        print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
+        print(f"Elapsed Collate time:\t\t{col_toc - col_tic} seconds")
+        print(f"Elapsed Total time:\t\t{tot_toc - tot_tic} seconds")
+
+        write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
 
 
+@njit(parallel=False)
+def exchange_av_vel(av_vel_t):
+    av_vels = np.zeros((nm.size()), dtype=np.float64)
+    av_vels[nm.rank()] = av_vel_t
+    if nm.size() > 1:
+        if nm.rank()==0:
+            buff = np.zeros((nm.size()), dtype=np.float64)
+            for j in range(1, nm.size()):
+                nm.recv(buff, source=j, tag=40)
+                av_vels[j] = buff[j]
+        else:
+            nm.send(av_vels, dest=0, tag=40)
+    return av_vels.mean()
+
+
+@njit(parallel=False)
 def exchange_halos(cells, nx):
-    buff = np.zeros(cells[0].shape)
     blk_sz = nx//nm.size()
     if nm.size() > 1:
         for i in range(nm.size()):
@@ -137,15 +156,12 @@ def exchange_halos(cells, nx):
                         nm.send(cells[start_blk], dest=j, tag=10)
                         nm.send(cells[end_blk], dest=j, tag=20)
             else:
-                nm.recv(buff, source=i, tag=10)
-                cells[start_blk] = buff
-                nm.recv(buff, source=i, tag=20)
-                cells[end_blk] = buff
+                nm.recv(cells[start_blk], source=i, tag=10)
+                nm.recv(cells[end_blk], source=i, tag=20)
 
-
+@njit(parallel=False)
 def collat_cells(cells, nx):
     blk_sz = nx//nm.size()
-    buff = np.zeros((blk_sz, cells.shape[1], cells.shape[2]))
     if nm.size() > 1:
         start_blk = nm.rank() * blk_sz
         end_blk = nm.rank() * blk_sz + blk_sz -1
@@ -153,11 +169,9 @@ def collat_cells(cells, nx):
             for j in range(1, nm.size()):
                 j_st = j*blk_sz
                 j_end = j*blk_sz + blk_sz - 1
-
-                nm.recv(buff, source=j, tag=30)
-                cells[j_st:j_end+1] = buff
+                nm.recv(cells[j_st:j_end+1], source=j, tag=30)
         else:
-            nm.send(cells[start_blk:end_blk], dest=0, tag=30)
+            nm.send(cells[start_blk:end_blk + 1], dest=0, tag=30)
 
 
 @njit(parallel=True)
@@ -168,7 +182,6 @@ def total_density(cells, nx, ny):
 def timestep(
     cells,
     obstacles,
-    # data_blk,
     start_blk,
     end_blk,
     nx,
@@ -188,7 +201,7 @@ def timestep(
     tmp = cells.copy()
 
     for jj in prange(ny):
-        for ii in prange(start_blk, end_blk):
+        for ii in prange(start_blk, end_blk + 1):
             # init in parallel sec
             c = np.zeros((NSPEEDS), dtype=np.float64)
             u = np.zeros((NSPEEDS), dtype=np.float64)
@@ -258,7 +271,7 @@ def timestep(
 
 def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
     viscosity = 1. / 6. * (2. / omega - 1.)
-    return av_velocity(cells, obstacles, nx, ny) * reynolds_dim / viscosity
+    return av_velocity(cells, obstacles, nx, ny, 0, nx-1) * reynolds_dim / viscosity
 
 
 def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
@@ -305,34 +318,19 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
             f.write(f"{ii} {av_vels[ii]}\n")
 
 
-@njit(parallel=True)
-def av_velocity(cells, obstacles, nx, ny):
+@njit(parallel=False)
+def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
     """TODO"""
     tot_cells = 0
     tot_u = 0.
     for jj in range(ny):
-        for ii in range(nx):
+        for ii in range(start_blk, end_blk+1):
             if not obstacles[ii][jj]:
-                local_density =  cells[ii][jj].sum()
-                # x-component of velocity
-                u_x = (
-                              cells[ii][jj][1] + cells[ii][jj][5] +
-                              cells[ii][jj][8] - (
-                                      cells[ii][jj][3] + cells[ii][jj][6] +
-                                      cells[ii][jj][7]
-                              )
-                      ) / local_density
-                # compute y velocity component
-                u_y = (
-                              cells[ii][jj][2] + cells[ii][jj][5] +
-                              cells[ii][jj][6] - (
-                                      cells[ii][jj][4] + cells[ii][jj][7] +
-                                      cells[ii][jj][8]
-                              )
-                      ) / local_density
-                # accumulate the norm of x- and y- velocity components
-                tot_u += sqrt((u_x * u_x) + (u_y * u_y))
-                # increase counter of inspected cells
+                c = cells[ii, jj]
+                ld =  c.sum()
+                u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
+                u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
+                tot_u = sqrt(u_x * u_x + u_y * u_y)
                 tot_cells += 1
     return tot_u / tot_cells
 
