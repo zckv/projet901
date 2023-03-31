@@ -1,4 +1,4 @@
-from numba import njit, stencil, prange
+from numba import njit, stencil, prange, float64, int32, boolean
 from argparse import ArgumentParser
 from math import sqrt, ceil
 from sys import argv
@@ -23,11 +23,6 @@ logger = logging.getLogger(os.path.basename(sys.argv[0]))
 logger.setLevel(llevel)
 coloredlogs.DEFAULT_FIELD_STYLES["levelname"]["color"] = "cyan"
 coloredlogs.install(logger=logger, level=llevel)
-
-
-class ProjectParser(ArgumentParser):
-    """Parse args from command line"""
-    # TODO
 
 
 def read_input_file(file_path):
@@ -76,20 +71,40 @@ def main():
     obstacles = np.zeros((ny, nx), dtype=np.bool_)
     for x, y in block:
             obstacles[x,y] = 1
-    av_vels = np.zeros(param["maxIters"], dtype=np.float64)
-
-    blk_sz = nx//nm.size()
-    # data_blk = np.array((blk_sz+2, ny))
-    start_blk = nm.rank()*blk_sz
-    end_blk = nm.rank()*blk_sz + blk_sz - 1
-
     logger.debug(param)
 
     init_toc = time.time()
     comp_tic = time.time()
-    logger.info(f"Rank: {nm.rank()}; {start_blk} {end_blk}")
+    # logger.info(f"Rank: {nm.rank()}; {start_blk} {end_blk}")
 
-    for tt in range(param["maxIters"]):
+    av_vels = compute(cells, obstacles, param["maxIters"], nx, ny, density, accel, omega)
+
+    comp_toc = time.time()
+    col_tic = time.time()
+
+    collat_cells(cells, nx)
+
+    col_toc = time.time()
+    tot_toc = time.time()
+
+    if nm.rank() == 0:
+        print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
+        print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
+        print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
+        print(f"Elapsed Collate time:\t\t{col_toc - col_tic} seconds")
+        print(f"Elapsed Total time:\t\t{tot_toc - tot_tic} seconds")
+
+        write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
+
+
+@njit #(float64[:](float64[:,:,:], boolean[:,:,:], int32, int32, int32, float64, float64, float64), parallel=False)
+def compute(cells, obstacles, n, nx, ny, density, accel, omega):
+    av_vels = np.zeros(n, dtype=np.float64)
+    blk_sz = nx//nm.size()
+    start_blk = nm.rank()*blk_sz
+    end_blk = nm.rank()*blk_sz + blk_sz - 1
+
+    for tt in range(n):
         timestep(
             cells,
             obstacles,
@@ -108,24 +123,7 @@ def main():
         #    logger.info(f"==timestep: {tt}==")
         #    logger.info(f"ev velocity: {av_vels[tt]}")
         #    logger.info(f"tot density: {total_density(cells, nx, ny)}")
-
-    comp_toc = time.time()
-    col_tic = time.time()
-
-    collat_cells(cells, nx)
-
-    col_toc = time.time()
-    tot_toc = time.time()
-
-
-    if nm.rank() == 0:
-        print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
-        print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
-        print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
-        print(f"Elapsed Collate time:\t\t{col_toc - col_tic} seconds")
-        print(f"Elapsed Total time:\t\t{tot_toc - tot_tic} seconds")
-
-        write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
+    return av_vels
 
 
 @njit(parallel=False)
@@ -269,6 +267,7 @@ def timestep(
                 cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
                 cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
 
+@njit(parallel=False)
 def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
     viscosity = 1. / 6. * (2. / omega - 1.)
     return av_velocity(cells, obstacles, nx, ny, 0, nx-1) * reynolds_dim / viscosity
@@ -318,7 +317,7 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
             f.write(f"{ii} {av_vels[ii]}\n")
 
 
-@njit(parallel=False)
+@njit(parallel=True)
 def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
     """TODO"""
     tot_cells = 0
@@ -326,11 +325,11 @@ def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
     for jj in range(ny):
         for ii in range(start_blk, end_blk+1):
             if not obstacles[ii][jj]:
-                c = cells[ii, jj]
+                c = cells[ii][jj]
                 ld =  c.sum()
                 u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
                 u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
-                tot_u = sqrt(u_x * u_x + u_y * u_y)
+                tot_u += np.sqrt((u_x * u_x) + (u_y * u_y))
                 tot_cells += 1
     return tot_u / tot_cells
 
