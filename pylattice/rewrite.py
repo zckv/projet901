@@ -1,9 +1,10 @@
 from numba import njit, stencil, prange
 from argparse import ArgumentParser
-from math import sqrt
+from math import sqrt, ceil
 from sys import argv
 
 import coloredlogs
+import numba_mpi as nm
 import logging
 import numpy as np
 import time
@@ -15,11 +16,13 @@ FINALSTATEFILE = "final_state.dat"
 INITIALSTATEFILE = "initial_state.dat"
 AVVELSFILE = "av_vels.dat"
 
-logging.basicConfig(encoding='utf-8', level=logging.DEBUG)
+llevel = logging.INFO
+
+logging.basicConfig(encoding='utf-8', level=llevel)
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
-logger.setLevel(logging.WARNING)
+logger.setLevel(llevel)
 coloredlogs.DEFAULT_FIELD_STYLES["levelname"]["color"] = "cyan"
-coloredlogs.install(logger=logger, level=logging.WARNING)
+coloredlogs.install(logger=logger, level=llevel)
 
 
 class ProjectParser(ArgumentParser):
@@ -72,41 +75,186 @@ def main():
     reynolds_dim = param["reynolds_dim"]
 
     # main_grid
-    cells = np.array([[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)], dtype=np.float32)
+    cells = np.array([[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)], dtype=np.float64)
     obstacles = np.zeros((ny, nx), dtype=np.bool_)
     for x, y in block:
             obstacles[x,y] = 1
-    av_vels = [0.0] * param["maxIters"]
+    av_vels = np.zeros(param["maxIters"], dtype=np.float64)
+
+    blk_sz = nx//nm.size()
+    # data_blk = np.array((blk_sz+2, ny))
+    start_blk = nm.rank()*blk_sz
+    end_blk = nm.rank()*blk_sz + blk_sz - 1
 
     logger.debug(param)
 
     init_toc = time.time()
     comp_tic = time.time()
+    logger.info(f"Rank: {nm.rank()}; {start_blk} {end_blk}")
 
     for tt in range(param["maxIters"]):
-        logger.info("==Start step==")
-        timestep(cells, obstacles, nx, ny, density, accel, omega)
-#        av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
-        logger.info(f"==timestep: {tt}==")
-#        logger.info(f"ev velocity: {av_vels[tt]}")
-#        logger.info(f"tot density: {total_density(cells, nx, ny)}")
+        timestep(
+            cells,
+            obstacles,
+      #       data_blk,
+            start_blk,
+            end_blk,
+            nx,
+            ny,
+            density,
+            accel,
+            omega
+        )
+        # exchange_halos(cells)
+        collat_cells(cells, nx)
+        if nm.rank() == 0:
+            av_vels[tt] = av_velocity(cells, obstacles, nx, ny)
+            logger.info(f"==timestep: {tt}==")
+            logger.info(f"ev velocity: {av_vels[tt]}")
+            logger.info(f"tot density: {total_density(cells, nx, ny)}")
 
     comp_toc = time.time()
-    col_tic = time.time()
-
-    # TODO collate data here
-
-    col_toc = time.time()
     tot_toc = time.time()
 
     print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
     print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
     print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
-    print(f"Elapsed Collate time:\t\t{col_toc - col_tic} seconds")
     print(f"Elapsed Total time:\t\t{tot_toc - tot_tic} seconds")
 
     write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
 
+
+def exchange_halos(cells, nx):
+    buff = np.zeros(cells[0].shape)
+    blk_sz = nx//nm.size()
+    if nm.size() > 1:
+        for i in range(nm.size()):
+            start_blk = i * blk_sz
+            end_blk = i * blk_sz + blk_sz - 1
+            if i == nm.rank():
+                for j in range(nm.size()):
+                    if j != i:
+                        nm.send(cells[start_blk], dest=j, tag=10)
+                        nm.send(cells[end_blk], dest=j, tag=20)
+            else:
+                nm.recv(buff, source=i, tag=10)
+                cells[start_blk] = buff
+                nm.recv(buff, source=i, tag=20)
+                cells[end_blk] = buff
+
+
+def collat_cells(cells, nx):
+    blk_sz = nx//nm.size()
+    buff = np.zeros((blk_sz, cells.shape[1], cells.shape[2]))
+    if nm.size() > 1:
+        start_blk = nm.rank() * blk_sz
+        end_blk = nm.rank() * blk_sz + blk_sz -1
+        if nm.rank()==0:
+            for j in range(1, nm.size()):
+                j_st = j*blk_sz
+                j_end = j*blk_sz + blk_sz - 1
+
+                nm.recv(buff, source=j, tag=30)
+                cells[j_st:j_end+1] = buff
+        else:
+            nm.send(cells[start_blk:end_blk], dest=0, tag=30)
+
+
+@njit(parallel=True)
+def total_density(cells, nx, ny):
+    return cells.sum()
+
+@njit(parallel=True)
+def timestep(
+    cells,
+    obstacles,
+    # data_blk,
+    start_blk,
+    end_blk,
+    nx,
+    ny,
+    density,
+    accel,
+    omega
+):
+    """One step elapse"""
+    c_sq = 1. / 3.  # square of speed of sound
+    w0 = 4. / 9.  # weighting factor
+    w1 = 1. / 9.  # weighting factor
+    w2 = 1. / 36.  # weighting factor
+    w3 = density * accel / 9.
+    w4 = density * accel / 36.
+
+    tmp = cells.copy()
+
+    for jj in prange(ny):
+        for ii in prange(start_blk, end_blk):
+            # init in parallel sec
+            c = np.zeros((NSPEEDS), dtype=np.float64)
+            u = np.zeros((NSPEEDS), dtype=np.float64)
+
+            # accelerate and propagate
+            y_n = (jj + 1) % ny
+            x_e = (ii + 1) % nx
+            y_s = (ny - 1) if jj == 0 else jj - 1 #  * ceil((jj)/(jj+1)) +  (jj - 1) * ceil((jj)/(jj+1) + 1 % 2)
+            x_w = (nx - 1) if ii == 0 else ii - 1
+
+            w3c = (w3 if jj == ny -2 else 0)
+            w4cn = (w4 if y_n == ny - 2 else 0)
+            w4cs = (w4 if y_s == ny - 2 else 0)
+
+            c[0] = tmp[ii][jj][0]
+            c[1] = tmp[x_e][jj][1] + w3c
+            c[2] = tmp[ii][y_n][2]
+            c[3] = tmp[x_w][jj][3] - w3c
+            c[4] = tmp[ii][y_s][4]
+            c[5] = tmp[x_e][y_n][5] + w4cn
+            c[6] = tmp[x_w][y_n][6] - w4cn
+            c[7] = tmp[x_w][y_s][7] - w4cs
+            c[8] = tmp[x_e][y_s][8] + w4cs
+
+            # rebound and collision
+            if obstacles[ii, jj]:
+                cells[ii][jj][1] = c[3]
+                cells[ii][jj][2] = c[4]
+                cells[ii][jj][3] = c[1]
+                cells[ii][jj][4] = c[2]
+                cells[ii][jj][5] = c[7]
+                cells[ii][jj][6] = c[8]
+                cells[ii][jj][7] = c[5]
+                cells[ii][jj][8] = c[6]
+            else:
+                ld =  c.sum()
+                u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
+                u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
+                u_sq = u_x * u_x + u_y * u_y
+                u_sq22 = 2 * c_sq * c_sq
+                uc_sq = u_sq / (2*c_sq)
+
+                u[1] = u_x / c_sq + (u_x * u_x) / u_sq22
+                u[2] = u_y / c_sq + (u_y * u_y) / u_sq22
+                u[3] = -u_x / c_sq + (-u_x * -u_x) / u_sq22
+                u[4] = -u_y / c_sq + (-u_y * -u_y) / u_sq22
+                u[5] = (u_x + u_y) / c_sq + ((u_x + u_y) * (u_x + u_y)) / u_sq22
+                u[6] = (-u_x + u_y) / c_sq + ((-u_x + u_y) * (-u_x + u_y)) / u_sq22
+                u[7] = (-u_x - u_y) / c_sq + ((-u_x - u_y) * (-u_x - u_y)) / u_sq22
+                u[8] = (u_x - u_y) / c_sq + ((u_x - u_y) * (u_x - u_y)) / u_sq22
+
+                # equilibrium densities
+                # zero velocity density: weight w0
+                cells[ii][jj][0] = c[0] + omega * (w0 * ld * (1. - uc_sq) - c[0])
+
+                # axis speeds: weight w1 */
+                cells[ii][jj][1] = c[1] + omega * (w1 * ld * (1 + u[1] - uc_sq) - c[1])
+                cells[ii][jj][2] = c[2] + omega * (w1 * ld * (1 + u[2] - uc_sq) - c[2])
+                cells[ii][jj][3] = c[3] + omega * (w1 * ld * (1 + u[3] - uc_sq) - c[3])
+                cells[ii][jj][4] = c[4] + omega * (w1 * ld * (1 + u[4] - uc_sq) - c[4])
+
+                # diagonal speeds: weight w2 */
+                cells[ii][jj][5] = c[5] + omega * (w2 * ld * (1 + u[5] - uc_sq) - c[5])
+                cells[ii][jj][6] = c[6] + omega * (w2 * ld * (1 + u[6] - uc_sq) - c[6])
+                cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
+                cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
 
 def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
     viscosity = 1. / 6. * (2. / omega - 1.)
@@ -188,91 +336,6 @@ def av_velocity(cells, obstacles, nx, ny):
                 tot_cells += 1
     return tot_u / tot_cells
 
-
-@njit(parallel=True)
-def total_density(cells, nx, ny):
-    return cells.sum()
-
-@njit(parallel=True)
-def timestep(cells, obstacles, nx, ny, density, accel, omega):
-    """One step elapse"""
-    c_sq = 1. / 3.  # square of speed of sound
-    w0 = 4. / 9.  # weighting factor
-    w1 = 1. / 9.  # weighting factor
-    w2 = 1. / 36.  # weighting factor
-    w3 = density * accel / 9.
-    w4 = density * accel / 36.
-
-    tmp = cells.copy()
-
-    for jj in prange(ny):
-        for ii in prange(nx):
-            # init in parallel sec
-            c = np.zeros((NSPEEDS), dtype=np.float32)
-            u = np.zeros((NSPEEDS), dtype=np.float32)
-
-            # accelerate and propagate
-            y_n = (jj + 1) % ny
-            x_e = (ii + 1) % nx
-            y_s = (ny - 1) if jj == 0 else jj - 1
-            x_w = (nx - 1) if ii == 0 else ii - 1
-
-            w3c = (w3 if jj == ny -2 else 0)
-            w4cn = (w4 if y_n == ny - 2 else 0)
-            w4cs = (w4 if y_s == ny - 2 else 0)
-
-            c[0] = tmp[ii][jj][0]
-            c[1] = tmp[x_e][jj][1] + w3c
-            c[2] = tmp[ii][y_n][2]
-            c[3] = tmp[x_w][jj][3] - w3c
-            c[4] = tmp[ii][y_s][4]
-            c[5] = tmp[x_e][y_n][5] + w4cn
-            c[6] = tmp[x_w][y_n][6] - w4cn
-            c[7] = tmp[x_w][y_s][7] - w4cs
-            c[8] = tmp[x_e][y_s][8] + w4cs
-
-            # rebound and collision
-            if obstacles[ii, jj]:
-                cells[ii][jj][1] = c[3]
-                cells[ii][jj][2] = c[4]
-                cells[ii][jj][3] = c[1]
-                cells[ii][jj][4] = c[2]
-                cells[ii][jj][5] = c[7]
-                cells[ii][jj][6] = c[8]
-                cells[ii][jj][7] = c[5]
-                cells[ii][jj][8] = c[6]
-            else:
-                ld =  c.sum()
-                u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
-                u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
-                u_sq = u_x * u_x + u_y * u_y
-                u_sq22 = 2 * c_sq * c_sq
-                uc_sq = u_sq / (2*c_sq)
-
-                u[1] = u_x / c_sq + (u_x * u_x) / u_sq22
-                u[2] = u_y / c_sq + (u_y * u_y) / u_sq22
-                u[3] = -u_x / c_sq + (-u_x * -u_x) / u_sq22
-                u[4] = -u_y / c_sq + (-u_y * -u_y) / u_sq22
-                u[5] = (u_x + u_y) / c_sq + ((u_x + u_y) * (u_x + u_y)) / u_sq22
-                u[6] = (-u_x + u_y) / c_sq + ((-u_x + u_y) * (-u_x + u_y)) / u_sq22
-                u[7] = (-u_x - u_y) / c_sq + ((-u_x - u_y) * (-u_x - u_y)) / u_sq22
-                u[8] = (u_x - u_y) / c_sq + ((u_x - u_y) * (u_x - u_y)) / u_sq22
-
-                # equilibrium densities
-                # zero velocity density: weight w0
-                cells[ii][jj][0] = c[0] + omega * (w0 * ld * (1. - uc_sq) - c[0])
-
-                # axis speeds: weight w1 */
-                cells[ii][jj][1] = c[1] + omega * (w1 * ld * (1 + u[1] - uc_sq) - c[1])
-                cells[ii][jj][2] = c[2] + omega * (w1 * ld * (1 + u[2] - uc_sq) - c[2])
-                cells[ii][jj][3] = c[3] + omega * (w1 * ld * (1 + u[3] - uc_sq) - c[3])
-                cells[ii][jj][4] = c[4] + omega * (w1 * ld * (1 + u[4] - uc_sq) - c[4])
-
-                # diagonal speeds: weight w2 */
-                cells[ii][jj][5] = c[5] + omega * (w2 * ld * (1 + u[5] - uc_sq) - c[5])
-                cells[ii][jj][6] = c[6] + omega * (w2 * ld * (1 + u[6] - uc_sq) - c[6])
-                cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
-                cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
 
 if __name__ == "__main__":
     main()
