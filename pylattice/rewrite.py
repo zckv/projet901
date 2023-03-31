@@ -97,36 +97,8 @@ def main():
         write_values(cells, obstacles, av_vels, nx, ny, density, param["maxIters"])
 
 
-@njit #(float64[:](float64[:,:,:], boolean[:,:,:], int32, int32, int32, float64, float64, float64), parallel=False)
-def compute(cells, obstacles, n, nx, ny, density, accel, omega):
-    av_vels = np.zeros(n, dtype=np.float64)
-    blk_sz = nx//nm.size()
-    start_blk = nm.rank()*blk_sz
-    end_blk = nm.rank()*blk_sz + blk_sz - 1
 
-    for tt in range(n):
-        timestep(
-            cells,
-            obstacles,
-            start_blk,
-            end_blk,
-            nx,
-            ny,
-            density,
-            accel,
-            omega
-        )
-        exchange_halos(cells, nx)
-        av_vels[tt] = av_velocity(cells, obstacles, nx, ny, start_blk, end_blk)
-        av_vels[tt] = exchange_av_vel(av_vels[tt])
-        # if nm.rank() == 0:
-        #    logger.info(f"==timestep: {tt}==")
-        #    logger.info(f"ev velocity: {av_vels[tt]}")
-        #    logger.info(f"tot density: {total_density(cells, nx, ny)}")
-    return av_vels
-
-
-@njit(parallel=False)
+@njit(float64(float64), parallel=False)
 def exchange_av_vel(av_vel_t):
     av_vels = np.zeros((nm.size()), dtype=np.float64)
     av_vels[nm.rank()] = av_vel_t
@@ -141,7 +113,7 @@ def exchange_av_vel(av_vel_t):
     return av_vels.mean()
 
 
-@njit(parallel=False)
+@njit((float64[:, :, :], int32), parallel=False)
 def exchange_halos(cells, nx):
     blk_sz = nx//nm.size()
     if nm.size() > 1:
@@ -157,7 +129,7 @@ def exchange_halos(cells, nx):
                 nm.recv(cells[start_blk], source=i, tag=10)
                 nm.recv(cells[end_blk], source=i, tag=20)
 
-@njit(parallel=False)
+@njit((float64[:, :, :], int32), parallel=False)
 def collat_cells(cells, nx):
     blk_sz = nx//nm.size()
     if nm.size() > 1:
@@ -172,11 +144,36 @@ def collat_cells(cells, nx):
             nm.send(cells[start_blk:end_blk + 1], dest=0, tag=30)
 
 
-@njit(parallel=True)
+@njit(int32(float64[:, :, :], int32, int32), parallel=True)
 def total_density(cells, nx, ny):
     return cells.sum()
 
-@njit(parallel=True)
+
+@njit(float64(float64[:,:,:], boolean[:,:], int32, int32, int32, int32), parallel=True)
+def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
+    """TODO"""
+    tot_cells = 0
+    tot_u = 0.
+
+    for jj in range(ny):
+        for ii in range(start_blk, end_blk+1):
+            if not obstacles[ii][jj]:
+                c = cells[ii][jj]
+                ld =  c.sum()
+                u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
+                u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
+                tot_u += np.sqrt((u_x * u_x) + (u_y * u_y))
+                tot_cells += 1
+    return tot_u / tot_cells
+
+
+@njit(float64(float64[:, :, :], boolean[:, :], int32, int32, float64, int32), parallel=False)
+def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
+    viscosity = 1. / 6. * (2. / omega - 1.)
+    return av_velocity(cells, obstacles, nx, ny, 0, nx-1) * reynolds_dim / viscosity
+
+
+@njit((float64[:,:,:], boolean[:,:], int32, int32, int32, int32, float64, float64, float64), parallel=True)
 def timestep(
     cells,
     obstacles,
@@ -267,10 +264,35 @@ def timestep(
                 cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
                 cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
 
-@njit(parallel=False)
-def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
-    viscosity = 1. / 6. * (2. / omega - 1.)
-    return av_velocity(cells, obstacles, nx, ny, 0, nx-1) * reynolds_dim / viscosity
+
+@njit(float64[:](float64[:,:,:], boolean[:,:], int32, int32, int32, float64, float64, float64), parallel=False)
+def compute(cells, obstacles, n, nx, ny, density, accel, omega):
+    av_vels = np.zeros(n, dtype=np.float64)
+    blk_sz = nx//nm.size()
+    start_blk = np.int32(nm.rank()*blk_sz)
+    end_blk = np.int32(nm.rank()*blk_sz + blk_sz - 1)
+
+    for tt in range(n):
+        timestep(
+            cells,
+            obstacles,
+            start_blk,
+            end_blk,
+            nx,
+            ny,
+            density,
+            accel,
+            omega
+        )
+        exchange_halos(cells, nx)
+        av_vels[tt] = av_velocity(cells, obstacles, nx, ny, start_blk, end_blk)
+        av_vels[tt] = exchange_av_vel(av_vels[tt])
+        # if nm.rank() == 0:
+        #    logger.info(f"==timestep: {tt}==")
+        #    logger.info(f"ev velocity: {av_vels[tt]}")
+        #    logger.info(f"tot density: {total_density(cells, nx, ny)}")
+    return av_vels
+
 
 
 def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
@@ -316,22 +338,6 @@ def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
         for ii in range(maxIters):
             f.write(f"{ii} {av_vels[ii]}\n")
 
-
-@njit(parallel=True)
-def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
-    """TODO"""
-    tot_cells = 0
-    tot_u = 0.
-    for jj in range(ny):
-        for ii in range(start_blk, end_blk+1):
-            if not obstacles[ii][jj]:
-                c = cells[ii][jj]
-                ld =  c.sum()
-                u_x = (c[1] + c[5] + c[8] - (c[3] + c[6] + c[7])) / ld
-                u_y = (c[2] + c[5] + c[6] - (c[4] + c[7] + c[8])) / ld
-                tot_u += np.sqrt((u_x * u_x) + (u_y * u_y))
-                tot_cells += 1
-    return tot_u / tot_cells
 
 
 if __name__ == "__main__":
