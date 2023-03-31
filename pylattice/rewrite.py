@@ -191,9 +191,8 @@ def timestep(
     w3 = density * accel / 9.
     w4 = density * accel / 36.
 
-    tot_cells = ((end_blk-start_blk+1) * obstacles.shape[1]) - obstacles[start_blk:end_blk+1].sum()
-    arr_av_vels = np.zeros((end_blk - start_blk + 1, ny), dtype=np.float64)
     tmp = cells.copy()
+    x = 0.
 
     for jj in prange(ny):
         for ii in prange(start_blk, end_blk + 1):
@@ -240,7 +239,7 @@ def timestep(
                 uc_sq = u_sq / (2*c_sq)
 
                 # Register av_vel
-                arr_av_vels[ii, jj] = np.sqrt(u_sq)
+                x += np.sqrt(u_sq)
 
                 u[1] = u_x / c_sq + (u_x * u_x) / u_sq22
                 u[2] = u_y / c_sq + (u_y * u_y) / u_sq22
@@ -266,18 +265,21 @@ def timestep(
                 cells[ii][jj][6] = c[6] + omega * (w2 * ld * (1 + u[6] - uc_sq) - c[6])
                 cells[ii][jj][7] = c[7] + omega * (w2 * ld * (1 + u[7] - uc_sq) - c[7])
                 cells[ii][jj][8] = c[8] + omega * (w2 * ld * (1 + u[8] - uc_sq) - c[8])
-    return 0 # arr_av_vels.sum() / tot_cells
+    return x
 
 
 @njit(float64[:](float64[:,:,:], boolean[:,:], int32, int32, int32, float64, float64, float64), parallel=False)
 def compute(cells, obstacles, n, nx, ny, density, accel, omega):
-    av_vels = np.zeros(n, dtype=np.float64)
     blk_sz = nx//nm.size()
     start_blk = np.int32(nm.rank()*blk_sz)
     end_blk = np.int32(nm.rank()*blk_sz + blk_sz - 1)
 
+    tot_cells = ((end_blk-start_blk+1) * obstacles.shape[1]) - obstacles[start_blk:end_blk+1].sum()
+    av_vels = np.zeros(n, dtype=np.float64)
+
     for tt in range(n):
-        av_vels[tt] = timestep(
+        # av_vels[tt] =
+        x = timestep(
             cells,
             obstacles,
             start_blk,
@@ -288,6 +290,7 @@ def compute(cells, obstacles, n, nx, ny, density, accel, omega):
             accel,
             omega
         )
+        av_vels[tt] = x/tot_cells
         exchange_halos(cells, nx)
         # av_vels[tt] = av_velocity(cells, obstacles, nx, ny, start_blk, end_blk)
         av_vels[tt] = exchange_av_vel(av_vels[tt])
