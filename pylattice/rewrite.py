@@ -1,5 +1,4 @@
 from numba import njit, stencil, prange, float64, int32, boolean
-from argparse import ArgumentParser
 from math import sqrt, ceil
 from sys import argv
 
@@ -16,8 +15,10 @@ FINALSTATEFILE = "final_state.dat"
 INITIALSTATEFILE = "initial_state.dat"
 AVVELSFILE = "av_vels.dat"
 
+# Niveau de logging
 llevel = logging.INFO
 
+# Configuration du logger
 logging.basicConfig(encoding='utf-8', level=llevel)
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
 logger.setLevel(llevel)
@@ -25,7 +26,10 @@ coloredlogs.DEFAULT_FIELD_STYLES["levelname"]["color"] = "cyan"
 coloredlogs.install(logger=logger, level=llevel)
 
 
-def read_input_file(file_path):
+def read_input_file(file_path: str):
+    """
+    Lecture du fichier input à partir d'un chemin
+    """
     d = {}
     with open(file_path, 'r') as f:
         d["nx"] = int(f.readline())
@@ -38,19 +42,29 @@ def read_input_file(file_path):
     return d
 
 
-def read_obstacle_file(file_path):
-    block = set()
+def read_obstacle_file(file_path, nx, ny):
+    """
+    Lecture du fichier d'obstacles à partir d'un chemin
+    """
+    block = np.zeros((ny, nx), dtype=np.bool_)
     with open(file_path, 'r') as f:
         for line in f:
             x, y, b = line.split()
-            block.add((int(x), int(y)))
+            block[int(x), int(y)] = 1
     return block
 
 
 def main():
-    # TODO initalization
+    """
+    Fonction principale du code
+
+    Les variables sont initialisées pour tous les rangs mpi.
+
+    Une fonction de calcul est lancée sur chaque rang.
+
+    Ensuite le rang 0 affiche les résultats et écrits les fichier de résultats.
+    """
     param = read_input_file(argv[1])
-    block = read_obstacle_file(argv[2])
 
     tot_tic = time.time()
     init_tic = time.time()
@@ -66,28 +80,30 @@ def main():
     omega = param["omega"]
     reynolds_dim = param["reynolds_dim"]
 
-    # main_grid
+    # init cells and obstacles
     cells = np.array([[[w0, w1, w1, w1, w1, w2, w2, w2, w2] for _ in range(nx)] for _ in range(ny)], dtype=np.float64)
-    obstacles = np.zeros((ny, nx), dtype=np.bool_)
-    for x, y in block:
-            obstacles[x,y] = 1
+    obstacles = read_obstacle_file(argv[2], nx, ny)
+
     logger.debug(param)
 
     init_toc = time.time()
     comp_tic = time.time()
     # logger.info(f"Rank: {nm.rank()}; {start_blk} {end_blk}")
 
+    # Fonction principale de calcul
     av_vels = compute(cells, obstacles, param["maxIters"], nx, ny, density, accel, omega)
 
     comp_toc = time.time()
     col_tic = time.time()
 
+    # Récuparation de la grille complète sur le rang 0
     collat_cells(cells, nx)
 
     col_toc = time.time()
     tot_toc = time.time()
 
     if nm.rank() == 0:
+        # Résultats
         print(f"Reynolds number:\t\t{calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim)}")
         print(f"Elapsed Init time:\t\t{init_toc - init_tic} seconds")
         print(f"Elapsed Compute time:\t\t{comp_toc - comp_tic} seconds")
@@ -100,6 +116,9 @@ def main():
 
 @njit(float64(float64), parallel=False)
 def exchange_av_vel(av_vel_t):
+    """
+    Envoi des valeurs moyennes de chaque bloc traité à rang 0
+    """
     av_vels = np.zeros((nm.size()), dtype=np.float64)
     av_vels[nm.rank()] = av_vel_t
     if nm.size() > 1:
@@ -115,6 +134,9 @@ def exchange_av_vel(av_vel_t):
 
 @njit((float64[:, :, :], int32), parallel=False)
 def exchange_halos(cells, nx):
+    """
+    Echanges des colonnes de halos entre les rangs
+    """
     blk_sz = nx//nm.size()
     if nm.size() > 1:
         for i in range(nm.size()):
@@ -131,6 +153,9 @@ def exchange_halos(cells, nx):
 
 @njit((float64[:, :, :], int32), parallel=False)
 def collat_cells(cells, nx):
+    """
+    Envoi du contenu de chaque rang traité au rang 0
+    """
     blk_sz = nx//nm.size()
     if nm.size() > 1:
         start_blk = nm.rank() * blk_sz
@@ -144,13 +169,13 @@ def collat_cells(cells, nx):
             nm.send(cells[start_blk:end_blk + 1], dest=0, tag=30)
 
 
-@njit(int32(float64[:, :, :], int32, int32), parallel=True)
-def total_density(cells, nx, ny):
-    return cells.sum()
-
-
 @njit(float64(float64[:,:,:], boolean[:,:], int32, int32, int32, int32), parallel=True)
 def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
+    """
+    Calcul la moyenne des vitesse des cellules.
+
+    Cette boucle n'est pas beaucoup utilisée, car lourde
+    """
     tot_cells = ((end_blk-start_blk+1) * obstacles.shape[1]) - obstacles[start_blk:end_blk+1].sum()
     tot_u = 0.
 
@@ -167,6 +192,9 @@ def av_velocity(cells, obstacles, nx, ny, start_blk, end_blk,):
 
 @njit(float64(float64[:, :, :], boolean[:, :], int32, int32, float64, int32), parallel=False)
 def calc_reynolds(cells, obstacles, nx, ny, omega, reynolds_dim):
+    """
+    Calcule quelque chose que je ne comprends pas
+    """
     viscosity = 1. / 6. * (2. / omega - 1.)
     return av_velocity(cells, obstacles, nx, ny, 0, nx-1) * reynolds_dim / viscosity
 
@@ -183,7 +211,11 @@ def timestep(
     accel,
     omega
 ):
-    """One step elapse"""
+    """
+    One step elapse
+
+    C'est le rassemblement de accelerate_flow, propagate, rebound, collision en une boucle.
+    """
     c_sq = 1. / 3.  # square of speed of sound
     w0 = 4. / 9.  # weighting factor
     w1 = 1. / 9.  # weighting factor
@@ -194,6 +226,7 @@ def timestep(
     tmp = cells.copy()
     x = 0.
 
+    # Boucle principale
     for jj in prange(ny):
         for ii in prange(start_blk, end_blk + 1):
             # init in parallel sec
@@ -270,6 +303,11 @@ def timestep(
 
 @njit(float64[:](float64[:,:,:], boolean[:,:], int32, int32, int32, float64, float64, float64), parallel=False)
 def compute(cells, obstacles, n, nx, ny, density, accel, omega):
+    """
+    Rassemble le nécessaire aux calculs.
+
+    Permet de simplifier le main, et de gagner un peu de temps.
+    """
     blk_sz = nx//nm.size()
     start_blk = np.int32(nm.rank()*blk_sz)
     end_blk = np.int32(nm.rank()*blk_sz + blk_sz - 1)
@@ -297,12 +335,16 @@ def compute(cells, obstacles, n, nx, ny, density, accel, omega):
         # if nm.rank() == 0:
         #    logger.info(f"==timestep: {tt}==")
         #    logger.info(f"ev velocity: {av_vels[tt]}")
-        #    logger.info(f"tot density: {total_density(cells, nx, ny)}")
+        #    logger.info(f"tot density: {cells.sum()}")
     return av_vels
 
 
 
 def write_values(cells, obstacles, av_vels, nx, ny, density, maxIters):
+    """
+    écrit les résultats dans les fichiers.
+    Les noms de fichiers sont déclarés en Constantes au début du fichier.
+    """
     c_sq = 1. / 3.
     with open(FINALSTATEFILE, "w") as f:
         for jj in range(ny):
